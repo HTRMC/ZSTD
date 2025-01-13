@@ -3,6 +3,10 @@
 #include <shlwapi.h>
 #include <memory>
 #include <filesystem>
+#include <fstream>
+#include <vector>
+#include <string>
+#include <zstd.h>
 
 extern HINSTANCE g_hInst;
 extern long g_cDllRef;
@@ -94,9 +98,97 @@ IFACEMETHODIMP ZstdShellExt::QueryContextMenu(HMENU hmenu, UINT indexMenu, UINT 
 }
 
 IFACEMETHODIMP ZstdShellExt::InvokeCommand(LPCMINVOKECOMMANDINFO pici) {
-    // TODO: Implement compression/decompression logic
-    MessageBoxW(NULL, L"ZSTD operation will be implemented here", L"ZSTD Shell Extension", MB_OK);
-    return S_OK;
+// Check if we're invoked directly or through command prompt
+    if (HIWORD(pici->lpVerb) != 0)
+        return E_INVALIDARG;
+
+    std::wstring filePath = m_selectedFile;
+    std::wstring ext = std::filesystem::path(filePath).extension();
+    bool isDecompressing = _wcsicmp(ext.c_str(), L".zst") == 0;
+
+    try {
+        // Open input file
+        std::ifstream inFile(filePath, std::ios::binary);
+        if (!inFile.is_open()) {
+            MessageBoxW(NULL, L"Failed to open input file", L"Error", MB_ICONERROR);
+            return E_FAIL;
+        }
+
+        // Get file size
+        inFile.seekg(0, std::ios::end);
+        size_t inSize = inFile.tellg();
+        inFile.seekg(0, std::ios::beg);
+
+        // Read input file
+        std::vector<char> inBuffer(inSize);
+        inFile.read(inBuffer.data(), inSize);
+        inFile.close();
+
+        if (isDecompressing) {
+            // Determine output path by removing .zst extension
+            std::wstring outPath = filePath.substr(0, filePath.length() - 4);
+
+            // Get original size from frame header
+            unsigned long long const rSize = ZSTD_getFrameContentSize(inBuffer.data(), inSize);
+            if (rSize == ZSTD_CONTENTSIZE_ERROR) {
+                MessageBoxW(NULL, L"Not a valid ZSTD compressed file", L"Error", MB_ICONERROR);
+                return E_FAIL;
+            }
+            if (rSize == ZSTD_CONTENTSIZE_UNKNOWN) {
+                MessageBoxW(NULL, L"Original size unknown - cannot decompress", L"Error", MB_ICONERROR);
+                return E_FAIL;
+            }
+
+            // Allocate output buffer
+            std::vector<char> outBuffer(rSize);
+
+            // Decompress
+            size_t const dSize = ZSTD_decompress(outBuffer.data(), rSize, inBuffer.data(), inSize);
+            if (ZSTD_isError(dSize)) {
+                MessageBoxW(NULL, L"Decompression failed", L"Error", MB_ICONERROR);
+                return E_FAIL;
+            }
+
+            // Write output file
+            std::ofstream outFile(outPath, std::ios::binary);
+            if (!outFile.is_open()) {
+                MessageBoxW(NULL, L"Failed to create output file", L"Error", MB_ICONERROR);
+                return E_FAIL;
+            }
+            outFile.write(outBuffer.data(), dSize);
+            outFile.close();
+        } else {
+            // Compressing - add .zst extension
+            std::wstring outPath = filePath + L".zst";
+
+            // Get a safe buffer size
+            size_t const cBuffSize = ZSTD_compressBound(inSize);
+            std::vector<char> outBuffer(cBuffSize);
+
+            // Compress with default level
+            size_t const cSize = ZSTD_compress(outBuffer.data(), cBuffSize, inBuffer.data(), inSize, ZSTD_CLEVEL_DEFAULT);
+            if (ZSTD_isError(cSize)) {
+                MessageBoxW(NULL, L"Compression failed", L"Error", MB_ICONERROR);
+                return E_FAIL;
+            }
+
+            // Write compressed file
+            std::ofstream outFile(outPath, std::ios::binary);
+            if (!outFile.is_open()) {
+                MessageBoxW(NULL, L"Failed to create output file", L"Error", MB_ICONERROR);
+                return E_FAIL;
+            }
+            outFile.write(outBuffer.data(), cSize);
+            outFile.close();
+        }
+
+        return S_OK;
+    }
+    catch (const std::exception& e) {
+        std::string errMsg = "Operation failed: " + std::string(e.what());
+        MessageBoxA(NULL, errMsg.c_str(), "Error", MB_ICONERROR);
+        return E_FAIL;
+    }
 }
 
 IFACEMETHODIMP ZstdShellExt::GetCommandString(UINT_PTR idCmd, UINT uFlags, UINT* pwReserved, LPSTR pszName, UINT cchMax) {
